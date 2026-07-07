@@ -1,0 +1,6 @@
+{
+  "name": "Wi-Fi Radar",
+  "description": "An advanced Wi-Fi signal tracking and human presence detection system. By monitoring real-time RSSI fluctuations, it identifies movement and disturbances in the surrounding space, supported by intelligent Gemini AI signal pattern analysis and persistent Room Database event logs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
