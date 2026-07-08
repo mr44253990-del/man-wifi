@@ -24,7 +24,7 @@ class GreetingScreenshotTest {
   fun greeting_screenshot() {
     composeTestRule.setContent {
       MyApplicationTheme {
-        RadarSweepView(statusType = RadarViewModel.StatusType.CALM, currentRssi = -45)
+        RadarMainScreen()
       }
     }
 
