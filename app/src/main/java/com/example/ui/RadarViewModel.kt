@@ -123,7 +123,7 @@ class RadarViewModel(
     private val _isMonitoring = MutableStateFlow(false)
     val isMonitoring: StateFlow<Boolean> = _isMonitoring.asStateFlow()
 
-    private val _isSimulationMode = MutableStateFlow(true)
+    private val _isSimulationMode = MutableStateFlow(false)
     val isSimulationMode: StateFlow<Boolean> = _isSimulationMode.asStateFlow()
 
     private val _status = MutableStateFlow("নিষ্ক্রিয় (Inactive)")
@@ -145,6 +145,25 @@ class RadarViewModel(
     // Scanned Wifi APs
     private val _scannedNetworks = MutableStateFlow<List<WifiApInfo>>(emptyList())
     val scannedNetworks: StateFlow<List<WifiApInfo>> = _scannedNetworks.asStateFlow()
+
+    // Bluetooth BLE scan states
+    private val _isBluetoothScanning = MutableStateFlow(false)
+    val isBluetoothScanning: StateFlow<Boolean> = _isBluetoothScanning.asStateFlow()
+
+    private val _bluetoothStatus = MutableStateFlow("নিষ্ক্রিয় (Inactive)")
+    val bluetoothStatus: StateFlow<String> = _bluetoothStatus.asStateFlow()
+
+    data class BluetoothDeviceInfo(
+        val name: String,
+        val macAddress: String,
+        val rssi: Int,
+        val distanceMeters: Double,
+        val deviceType: String, // "Phone", "Smartwatch", "Audio", "Smart Beacon"
+        val lastSeen: Long = System.currentTimeMillis()
+    )
+
+    private val _scannedBluetoothDevices = MutableStateFlow<List<BluetoothDeviceInfo>>(emptyList())
+    val scannedBluetoothDevices: StateFlow<List<BluetoothDeviceInfo>> = _scannedBluetoothDevices.asStateFlow()
 
     // Room Database Event Feed
     val loggedEvents: StateFlow<List<RadarEvent>> = repository.allEvents
@@ -404,6 +423,7 @@ class RadarViewModel(
 
         recalculateDistance(nextRssi)
         evaluatePresenceAndLog(drop, nextRssi)
+        updateDynamicUserPath()
     }
 
     private fun recalculateDistance(rssi: Int) {
@@ -606,6 +626,7 @@ class RadarViewModel(
 
             _compassHeading.value = azimuth
             updateCompassName(azimuth)
+            updateDynamicUserPath()
         } else {
             // Fallback utilizing Accel + Mag
             if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
@@ -624,6 +645,7 @@ class RadarViewModel(
 
                 _compassHeading.value = azimuth
                 updateCompassName(azimuth)
+                updateDynamicUserPath()
             }
         }
     }
@@ -642,6 +664,118 @@ class RadarViewModel(
         }
         
         _directionName.value = "$name"
+    }
+
+    fun updateDynamicUserPath() {
+        val heading = _compassHeading.value.toDouble()
+        val distance = _distanceMeters.value
+        val angleRad = Math.toRadians((heading - 180.0) % 360.0)
+        val maxRange = 15.0
+        val normalizedDist = (distance / maxRange).coerceIn(0.15, 0.9)
+        _userPathX.value = (-0.4f + normalizedDist * sin(angleRad)).toFloat()
+        _userPathY.value = (-0.4f + normalizedDist * cos(angleRad)).toFloat()
+    }
+
+    // Bluetooth BLE Scan Callback & Helpers
+    private val bleScanCallback = object : android.bluetooth.le.ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult?) {
+            result?.let { res ->
+                val device = res.device
+                val name = res.scanRecord?.deviceName ?: device.name ?: "Unknown Device"
+                val address = device.address ?: "00:00:00:00:00:00"
+                val rssi = res.rssi
+                
+                val updatedList = _scannedBluetoothDevices.value.toMutableList()
+                val existingIndex = updatedList.indexOfFirst { it.macAddress == address }
+                
+                // Signal distance calculation:
+                val exponent = 2.4
+                val distance = Math.pow(10.0, (-59.0 - rssi) / (10.0 * exponent))
+                val roundedDist = Math.max(0.5, Math.round(distance * 10.0) / 10.0)
+                
+                val type = when {
+                    name.lowercase().contains("phone") || name.lowercase().contains("galaxy") || name.lowercase().contains("iphone") || name.lowercase().contains("pixel") || name.lowercase().contains("oneplus") || name.lowercase().contains("redmi") || name.lowercase().contains("vivo") || name.lowercase().contains("oppo") -> "Phone"
+                    name.lowercase().contains("watch") || name.lowercase().contains("gear") || name.lowercase().contains("fit") || name.lowercase().contains("band") || name.lowercase().contains("huawei") || name.lowercase().contains("active") -> "Smartwatch"
+                    name.lowercase().contains("buds") || name.lowercase().contains("ear") || name.lowercase().contains("headphone") || name.lowercase().contains("speaker") || name.lowercase().contains("airpods") || name.lowercase().contains("sound") -> "Audio Device"
+                    else -> "Smart Beacon"
+                }
+                
+                val info = BluetoothDeviceInfo(
+                    name = name,
+                    macAddress = address,
+                    rssi = rssi,
+                    distanceMeters = roundedDist,
+                    deviceType = type,
+                    lastSeen = System.currentTimeMillis()
+                )
+                
+                if (existingIndex >= 0) {
+                    updatedList[existingIndex] = info
+                } else {
+                    updatedList.add(info)
+                }
+                
+                val now = System.currentTimeMillis()
+                val activeDevices = updatedList.filter { now - it.lastSeen < 15000 }
+                _scannedBluetoothDevices.value = activeDevices.sortedByDescending { it.rssi }
+            }
+        }
+
+        override fun onBatchScanResults(results: MutableList<android.bluetooth.le.ScanResult>?) {
+            results?.forEach { onScanResult(0, it) }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e("RadarViewModel", "BLE Scan Failed: $errorCode")
+        }
+    }
+
+    fun startBluetoothScan() {
+        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter
+        if (adapter == null) {
+            _bluetoothStatus.value = "ব্লুটুথ সমর্থিত নয়"
+            return
+        }
+        if (!adapter.isEnabled) {
+            _bluetoothStatus.value = "ব্লুটুথ বন্ধ আছে"
+            return
+        }
+
+        try {
+            val scanner = adapter.bluetoothLeScanner
+            if (scanner == null) {
+                _bluetoothStatus.value = "স্ক্যানার চালু করা যাচ্ছে না"
+                return
+            }
+            _bluetoothStatus.value = "স্ক্যান করা হচ্ছে..."
+            _isBluetoothScanning.value = true
+            scanner.startScan(bleScanCallback)
+        } catch (e: SecurityException) {
+            _bluetoothStatus.value = "পারমিশন প্রয়োজন"
+            Log.e("RadarViewModel", "Bluetooth permission error: ${e.message}")
+        } catch (e: Exception) {
+            _bluetoothStatus.value = "স্ক্যান শুরু করা যায়নি"
+            Log.e("RadarViewModel", "Bluetooth scan start error: ${e.message}")
+        }
+    }
+
+    fun stopBluetoothScan() {
+        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter
+        try {
+            if (adapter != null && adapter.isEnabled && _isBluetoothScanning.value) {
+                adapter.bluetoothLeScanner?.stopScan(bleScanCallback)
+            }
+        } catch (e: Exception) {
+            Log.e("RadarViewModel", "Stop scan error: ${e.message}")
+        }
+        _isBluetoothScanning.value = false
+        _bluetoothStatus.value = "বন্ধ আছে"
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopBluetoothScan()
+        stopMonitoring()
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {

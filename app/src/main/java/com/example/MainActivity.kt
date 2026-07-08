@@ -7,8 +7,11 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Bundle
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -175,19 +178,48 @@ fun RadarMainScreen() {
         label = "StateColor"
     )
 
+    val isBluetoothScanning by viewModel.isBluetoothScanning.collectAsState()
+    val bluetoothStatus by viewModel.bluetoothStatus.collectAsState()
+    val scannedBluetoothDevices by viewModel.scannedBluetoothDevices.collectAsState()
+
     // Permission handle
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
         val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
-        if (fineGranted || coarseGranted) {
-            viewModel.setSimulationMode(false)
-            Toast.makeText(context, "বাস্তব ওয়াই-ফাই সেন্সর সক্রিয় করা হয়েছে", Toast.LENGTH_SHORT).show()
+        val btScanGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions[Manifest.permission.BLUETOOTH_SCAN] ?: false
         } else {
-            Toast.makeText(context, "অনুমতি না থাকায় সিমুলেশন মোড চালু রইলো", Toast.LENGTH_LONG).show()
-            viewModel.setSimulationMode(true)
+            true
         }
+        
+        if (fineGranted || coarseGranted) {
+            Toast.makeText(context, "বাস্তব ওয়াই-ফাই ও লোকেশন সেন্সর সক্রিয় করা হয়েছে", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "অনুমতি না থাকায় কিছু ফিচার সীমাবদ্ধ থাকতে পারে। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
+        }
+        
+        if (!btScanGranted) {
+            Toast.makeText(context, "ব্লুটুথ স্ক্যান পারমিশন না দিলে আশেপাশের ডিভাইস শনাক্ত করা যাবে না।", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val permissionsToRequest = remember {
+        val list = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            list.add(Manifest.permission.BLUETOOTH_SCAN)
+            list.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        list.toTypedArray()
+    }
+
+    LaunchedEffect(Unit) {
+        // Automatically request permissions on entering the application
+        permissionLauncher.launch(permissionsToRequest)
     }
 
     Scaffold(
@@ -271,6 +303,14 @@ fun RadarMainScreen() {
                         scannedNetworks = scannedNetworks
                     )
                 }
+                "bluetooth" -> {
+                    BluetoothDeviceRadarScreen(
+                        viewModel = viewModel,
+                        isScanning = isBluetoothScanning,
+                        scanStatus = bluetoothStatus,
+                        devices = scannedBluetoothDevices
+                    )
+                }
             }
         }
     }
@@ -298,6 +338,7 @@ fun RadarBottomNav(
             Triple("home", "হোম", Icons.Outlined.Dashboard),
             Triple("map", "মানচিত্র", Icons.Outlined.Map),
             Triple("radar", "রাডার", Icons.Outlined.Radar),
+            Triple("bluetooth", "ব্লুটুথ", Icons.Outlined.Bluetooth),
             Triple("history", "ইতিহাস", Icons.Outlined.History),
             Triple("settings", "সেটিংস", Icons.Outlined.Settings)
         )
@@ -651,7 +692,8 @@ fun HomeDashboardScreen(
                                     modifier = Modifier.size(90.dp),
                                     statusType = statusType,
                                     currentRssi = currentRssi,
-                                    distance = distanceMeters
+                                    distance = distanceMeters,
+                                    compassHeading = compassHeading
                                 )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
@@ -1408,7 +1450,8 @@ fun SimpleMiniSweepView(
     modifier: Modifier = Modifier,
     statusType: RadarViewModel.StatusType,
     currentRssi: Int,
-    distance: Double
+    distance: Double,
+    compassHeading: Float
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "RadarSweepMini")
     val angle by infiniteTransition.animateFloat(
@@ -1444,8 +1487,15 @@ fun SimpleMiniSweepView(
         drawLine(color.copy(alpha = 0.6f), center, Offset(endX, endY), 1.5.dp.toPx())
 
         // Radar reflection target point (representing the Router)
-        // Put it at a slight offset
-        val targetPos = Offset(center.x + radius * 0.5f, center.y - radius * 0.4f)
+        // Calculated dynamically using the actual compass angle and distance!
+        val relativeAngleRad = Math.toRadians((360.0 - compassHeading) % 360.0)
+        val maxRange = 15.0
+        val fraction = (distance / maxRange).coerceIn(0.15, 0.95)
+        val targetRadius = (radius * fraction).toFloat()
+        val targetPos = Offset(
+            center.x + targetRadius * sin(relativeAngleRad).toFloat(),
+            center.y - targetRadius * cos(relativeAngleRad).toFloat()
+        )
         val targetIntensity = ((currentRssi + 95f) / 65f).coerceIn(0.1f, 1f)
 
         // Draw target dot representing router presence
@@ -1596,13 +1646,16 @@ fun InteractiveMapScreen(
     statusType: RadarViewModel.StatusType,
     stateThemeColor: Color
 ) {
+    val scannedNetworks by viewModel.scannedNetworks.collectAsState()
     var showHeatmap by remember { mutableStateOf(true) }
     var showGridOverlay by remember { mutableStateOf(true) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(DeepDarkBlue)
             .padding(14.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         // Map Control Header
         Row(
@@ -1652,7 +1705,7 @@ fun InteractiveMapScreen(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .height(280.dp),
             colors = CardDefaults.cardColors(containerColor = RadarCardBg),
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
@@ -1711,6 +1764,176 @@ fun InteractiveMapScreen(
                     lineHeight = 16.sp
                 )
             }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Multi AP Orbit Map Header
+        Text(
+            text = "আশেপাশের ওয়াই-ফাই সিগন্যাল ম্যাপ",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "চারপাশের ওয়াই-ফাই রাউটারগুলোর দূরত্ব ও সিগন্যাল শতাংশ লাইভ গ্রাফ ম্যাপ",
+            color = RadarTextMuted,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        // WiFi Orbit Map Canvas Container
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(200.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(RadarCardBg)
+                .border(BorderStroke(0.5.dp, Color.White.copy(alpha = 0.08f)))
+                .padding(12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            WifiOrbitMapCanvas(networks = scannedNetworks)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // List of all scanned routers
+        Text(
+            text = "আশেপাশের রাউটার তালিকা (${scannedNetworks.size}টি সচল)",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        if (scannedNetworks.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(100.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(RadarCardBg),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "কোনো ওয়াই-ফাই রাউটার স্ক্যান তথ্য নেই।", color = RadarTextMuted, fontSize = 12.sp)
+            }
+        } else {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                scannedNetworks.forEach { ap ->
+                    val signalPercent = (ap.rssi + 100).coerceIn(0, 100)
+                    val distanceEst = Math.pow(10.0, (-32.0 - ap.rssi) / 20.0).coerceIn(0.5, 35.0)
+                    val distanceFormatted = String.format("%.1f", distanceEst)
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = RadarCardBg),
+                        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.05f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (ap.ssid.isEmpty()) "লুকানো SSID" else ap.ssid,
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "BSSID: ${ap.bssid}",
+                                    color = RadarTextMuted,
+                                    fontSize = 11.sp
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = "সিগন্যাল: $signalPercent%",
+                                    color = if (ap.rssi > -65) RadarNeonGreen else if (ap.rssi > -80) RadarYellow else RadarRed,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "~$distanceFormatted m | ${ap.rssi} dBm",
+                                    color = RadarCyan,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun WifiOrbitMapCanvas(networks: List<RadarViewModel.WifiApInfo>) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val w = size.width
+        val h = size.height
+        val center = Offset(w / 2f, h / 2f)
+        val maxRadius = Math.min(w, h) / 2f - 16.dp.toPx()
+
+        // Draw orbital grid rings
+        val orbits = listOf(0.33f, 0.66f, 1f)
+        orbits.forEach { frac ->
+            drawCircle(
+                color = RadarCyan.copy(alpha = 0.1f),
+                radius = maxRadius * frac,
+                center = center,
+                style = Stroke(width = 1.dp.toPx())
+            )
+        }
+
+        // Draw crosshairs
+        drawLine(RadarCyan.copy(alpha = 0.08f), Offset(center.x - maxRadius, center.y), Offset(center.x + maxRadius, center.y))
+        drawLine(RadarCyan.copy(alpha = 0.08f), Offset(center.x, center.y - maxRadius), Offset(center.x, center.y + maxRadius))
+
+        // Center Node representing the user's phone
+        drawCircle(Color.White, 5.dp.toPx(), center)
+        drawCircle(RadarCyan.copy(alpha = 0.25f), 10.dp.toPx(), center, style = Stroke(width = 1.dp.toPx()))
+
+        // Plot nearby APs
+        networks.forEachIndexed { index, ap ->
+            val angle = index * (360.0 / Math.max(1, networks.size)) + 30.0
+            val angleRad = Math.toRadians(angle)
+            
+            // Map RSSI to radius (inverted so stronger signals are closer)
+            val rssiCoerced = ap.rssi.coerceIn(-100, -30)
+            val frac = ((rssiCoerced + 100) / 70f).coerceIn(0.1f, 1.0f)
+            val invFrac = (1.0f - (frac * 0.75f)).coerceIn(0.15f, 0.95f)
+            
+            val radius = maxRadius * invFrac
+            val apPos = Offset(
+                center.x + radius * cos(angleRad).toFloat(),
+                center.y + radius * sin(angleRad).toFloat()
+            )
+
+            // Draw router dot
+            val color = if (ap.rssi > -65) RadarNeonGreen else if (ap.rssi > -80) RadarYellow else RadarRed
+            drawCircle(color, 5.dp.toPx(), apPos)
+            drawCircle(color.copy(alpha = 0.2f), 11.dp.toPx(), apPos)
+
+            // Label SSID
+            drawContext.canvas.nativeCanvas.drawText(
+                if (ap.ssid.isEmpty()) "Wifi AP" else if (ap.ssid.length > 10) ap.ssid.take(10) + ".." else ap.ssid,
+                apPos.x,
+                apPos.y - 8.dp.toPx(),
+                android.graphics.Paint().apply {
+                    this.color = android.graphics.Color.WHITE
+                    textSize = 8.sp.toPx()
+                    textAlign = android.graphics.Paint.Align.CENTER
+                }
+            )
         }
     }
 }
@@ -1838,6 +2061,8 @@ fun ImmersiveRadarScreen(
     distanceMeters: Double,
     stateThemeColor: Color
 ) {
+    val compassHeading by viewModel.compassHeading.collectAsState()
+
     val infiniteTransition = rememberInfiniteTransition(label = "RadarImmersive")
     val angle by infiniteTransition.animateFloat(
         initialValue = 0f,
@@ -1894,7 +2119,8 @@ fun ImmersiveRadarScreen(
                 angle = angle,
                 statusType = statusType,
                 rssi = currentRssi,
-                dist = distanceMeters
+                dist = distanceMeters,
+                compassHeading = compassHeading
             )
         }
 
@@ -1927,7 +2153,8 @@ fun RadarImmersiveSweep(
     angle: Float,
     statusType: RadarViewModel.StatusType,
     rssi: Int,
-    dist: Double
+    dist: Double,
+    compassHeading: Float
 ) {
     val color = when (statusType) {
         RadarViewModel.StatusType.CALM -> RadarNeonGreen
@@ -1986,11 +2213,14 @@ fun RadarImmersiveSweep(
             topLeft = Offset(center.x - radius, center.y - radius)
         )
 
-        // Draw Lock point coordinate target (Locked at NE, roughly 300 degrees index)
-        val targetRad = Math.toRadians(300.0)
+        // Draw Lock point coordinate target (Calculated dynamically using compass heading!)
+        val targetRad = Math.toRadians((360.0 - compassHeading) % 360.0)
+        val maxRange = 15.0
+        val fraction = (dist / maxRange).coerceIn(0.15, 0.95)
+        val targetRadius = radius * fraction.toFloat()
         val targetPos = Offset(
-            center.x + (radius * 0.65f) * cos(targetRad).toFloat(),
-            center.y + (radius * 0.65f) * sin(targetRad).toFloat()
+            center.x + targetRadius * sin(targetRad).toFloat(),
+            center.y - targetRadius * cos(targetRad).toFloat()
         )
 
         // Target pulsing shell
@@ -2540,6 +2770,423 @@ fun RadarEventLogItem(event: RadarEvent) {
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------
+// BLUETOOTH RADAR SCREEN
+// ---------------------------------------------------------
+@Composable
+fun BluetoothDeviceRadarScreen(
+    viewModel: RadarViewModel,
+    isScanning: Boolean,
+    scanStatus: String,
+    devices: List<RadarViewModel.BluetoothDeviceInfo>
+) {
+    val context = LocalContext.current
+    
+    // Auto start Bluetooth Scan if permissions exist and Bluetooth is enabled on entering tab
+    LaunchedEffect(Unit) {
+        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter
+        if (adapter != null && adapter.isEnabled) {
+            viewModel.startBluetoothScan()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DeepDarkBlue)
+            .padding(16.dp)
+    ) {
+        // Tab Header
+        Text(
+            text = "আশেপাশের ডিভাইস ট্র্যাকার",
+            color = Color.White,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Text(
+            text = "আশেপাশের সচল ব্লুটুথ ডিভাইস, ফোন এবং স্মার্ট ব্যান্ড রিয়েল-টাইমে স্ক্যান করুন",
+            color = RadarTextMuted,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Status Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(containerColor = RadarCardBg),
+            border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.08f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "ব্লুটুথ স্ট্যাটাস:",
+                        color = RadarTextMuted,
+                        fontSize = 11.sp
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (isScanning) RadarNeonGreen else RadarRed)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = scanStatus,
+                            color = if (isScanning) RadarNeonGreen else Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        if (isScanning) {
+                            viewModel.stopBluetoothScan()
+                        } else {
+                            viewModel.startBluetoothScan()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isScanning) RadarRed.copy(alpha = 0.2f) else RadarNeonGreen.copy(alpha = 0.2f),
+                        contentColor = if (isScanning) RadarRed else RadarNeonGreen
+                    ),
+                    border = BorderStroke(1.dp, if (isScanning) RadarRed else RadarNeonGreen),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(text = if (isScanning) "স্ক্যান বন্ধ করুন" else "স্ক্যান শুরু করুন", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        // Bluetooth hardware / Permission alert (if bluetooth is off)
+        val adapter = remember { (context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter }
+        if (adapter == null) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = RadarRed.copy(alpha = 0.1f)),
+                border = BorderStroke(0.5.dp, RadarRed.copy(alpha = 0.3f))
+            ) {
+                Text(
+                    text = "দুঃখিত, এই ডিভাইসে ব্লুটুথ হার্ডওয়্যার পাওয়া যায়নি।",
+                    color = RadarRed,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(12.dp),
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else if (!adapter.isEnabled) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = RadarYellow.copy(alpha = 0.12f)),
+                border = BorderStroke(0.5.dp, RadarYellow.copy(alpha = 0.3f))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "⚠️ ব্লুটুথ বন্ধ আছে!",
+                        color = RadarYellow,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "আশেপাশের সক্রিয় ফোন, ব্লুটুথ এবং স্মার্ট ডিভাইসগুলির সিগন্যাল ট্র্যাক করার জন্য আপনার ফোনের ব্লুটুথ চালু করা আবশ্যক। অনুগ্রহ করে কুইক প্যানেল বা সেটিংস থেকে ব্লুটুথ অন করুন।",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+            }
+        }
+
+        // 3D/2D Radar Map Canvas
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1.1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(RadarCardBg)
+                .border(BorderStroke(0.5.dp, Color.White.copy(alpha = 0.08f)))
+                .padding(12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            BluetoothRadarMapCanvas(devices = devices, isScanning = isScanning)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Device List Header
+        Text(
+            text = "শনাক্তকৃত ডিভাইসের তালিকা (${devices.size}টি)",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        // Device List
+        if (devices.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(0.9f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(RadarCardBg.copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Filled.Bluetooth,
+                        contentDescription = "No Devices",
+                        tint = RadarTextMuted,
+                        modifier = Modifier.size(36.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (isScanning) "কোনো সক্রিয় ডিভাইস পাওয়া যায়নি। স্ক্যানিং চলছে..." else "ডিভাইস খুঁজতে উপরের 'স্ক্যান শুরু করুন' চাপুন",
+                        color = RadarTextMuted,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(0.9f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(devices) { dev ->
+                    BluetoothDeviceRow(device = dev)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BluetoothRadarMapCanvas(
+    devices: List<RadarViewModel.BluetoothDeviceInfo>,
+    isScanning: Boolean
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "RadarSweep")
+    val rotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "rotation"
+    )
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("bluetooth_radar_canvas")
+    ) {
+        val w = size.width
+        val h = size.height
+        val center = Offset(w / 2f, h / 2f)
+        val maxRadius = Math.min(w, h) / 2f - 16.dp.toPx()
+
+        // 1. Draw Grid Rings
+        val rings = listOf(0.25f, 0.5f, 0.75f, 1f)
+        rings.forEach { rFrac ->
+            drawCircle(
+                color = RadarNeonGreen.copy(alpha = 0.1f),
+                radius = maxRadius * rFrac,
+                center = center,
+                style = Stroke(width = 1.dp.toPx())
+            )
+        }
+
+        // Draw Crosshairs
+        drawLine(
+            color = RadarNeonGreen.copy(alpha = 0.15f),
+            start = Offset(center.x - maxRadius, center.y),
+            end = Offset(center.x + maxRadius, center.y),
+            strokeWidth = 1.dp.toPx()
+        )
+        drawLine(
+            color = RadarNeonGreen.copy(alpha = 0.15f),
+            start = Offset(center.x, center.y - maxRadius),
+            end = Offset(center.x, center.y + maxRadius),
+            strokeWidth = 1.dp.toPx()
+        )
+
+        // Draw Center Node (Self)
+        drawCircle(
+            color = RadarNeonGreen,
+            radius = 6.dp.toPx(),
+            center = center
+        )
+        drawCircle(
+            color = RadarNeonGreen.copy(alpha = 0.25f),
+            radius = 12.dp.toPx(),
+            center = center,
+            style = Stroke(width = 2.dp.toPx())
+        )
+
+        // 2. Draw sweep line
+        if (isScanning) {
+            val angleRad = Math.toRadians(rotation.toDouble() - 90.0)
+            val lineEnd = Offset(
+                center.x + maxRadius * cos(angleRad).toFloat(),
+                center.y + maxRadius * sin(angleRad).toFloat()
+            )
+            drawLine(
+                color = RadarNeonGreen.copy(alpha = 0.4f),
+                start = center,
+                end = lineEnd,
+                strokeWidth = 2.dp.toPx()
+            )
+        }
+
+        // 3. Draw Scanned Devices around Center
+        devices.forEachIndexed { idx, dev ->
+            // Distribute devices around radar circle based on hash or index
+            val angleOffset = (idx * (360.0 / Math.max(1, devices.size))) + 15.0
+            val angleRad = Math.toRadians(angleOffset)
+            
+            // Map distance to radius fraction
+            val maxRange = 15.0
+            val fraction = (dev.distanceMeters / maxRange).coerceIn(0.15, 0.95)
+            val deviceRadius = (maxRadius * fraction).toFloat()
+            
+            val devicePos = Offset(
+                center.x + deviceRadius * cos(angleRad).toFloat(),
+                center.y + deviceRadius * sin(angleRad).toFloat()
+            )
+
+            // Glow based on signal strength
+            val glowAlpha = (dev.rssi + 100) / 100f
+            val color = when (dev.deviceType) {
+                "Phone" -> RadarNeonGreen
+                "Smartwatch" -> RadarYellow
+                "Audio Device" -> RadarCyan
+                else -> RadarTextMuted
+            }
+
+            drawCircle(
+                color = color.copy(alpha = 0.25f * glowAlpha.coerceIn(0.2f, 1f)),
+                radius = 12.dp.toPx(),
+                center = devicePos
+            )
+            drawCircle(
+                color = color,
+                radius = 5.dp.toPx(),
+                center = devicePos
+            )
+        }
+    }
+}
+
+@Composable
+fun BluetoothDeviceRow(device: RadarViewModel.BluetoothDeviceInfo) {
+    val typeColor = when (device.deviceType) {
+        "Phone" -> RadarNeonGreen
+        "Smartwatch" -> RadarYellow
+        "Audio Device" -> RadarCyan
+        else -> RadarTextMuted
+    }
+
+    val icon = when (device.deviceType) {
+        "Phone" -> Icons.Filled.Smartphone
+        "Smartwatch" -> Icons.Filled.DeveloperBoard
+        "Audio Device" -> Icons.Filled.Bluetooth
+        else -> Icons.Filled.Bluetooth
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("bt_device_${device.macAddress}"),
+        colors = CardDefaults.cardColors(containerColor = RadarCardBg),
+        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.05f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Icon
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(typeColor.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = device.deviceType,
+                    tint = typeColor,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // Info
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.name,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = device.deviceType,
+                        color = typeColor,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "•  MAC: ${device.macAddress}",
+                        color = RadarTextMuted,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+
+            // Distance & RSSI
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "${device.distanceMeters}m দূরে",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "${device.rssi} dBm",
+                    color = if (device.rssi > -70) RadarNeonGreen else if (device.rssi > -85) RadarYellow else RadarRed,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace
                 )
             }
         }
