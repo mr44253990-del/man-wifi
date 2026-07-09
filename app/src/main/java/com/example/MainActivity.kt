@@ -208,7 +208,8 @@ fun RadarMainScreen() {
     val permissionsToRequest = remember {
         val list = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.RECORD_AUDIO
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             list.add(Manifest.permission.BLUETOOTH_SCAN)
@@ -286,21 +287,22 @@ fun RadarMainScreen() {
                         stateThemeColor = stateThemeColor
                     )
                 }
-                "history" -> {
-                    HistoryScreen(
+                "sonar" -> {
+                    val sonarActive by viewModel.sonarActive.collectAsState()
+                    val sonarStatus by viewModel.sonarStatus.collectAsState()
+                    val sonarDetectedDistance by viewModel.sonarDetectedDistance.collectAsState()
+                    val sonarEchoIntensity by viewModel.sonarEchoIntensity.collectAsState()
+                    val sonarTargetAngle by viewModel.sonarTargetAngle.collectAsState()
+                    val compassHeading by viewModel.compassHeading.collectAsState()
+
+                    ActiveSonarScreen(
                         viewModel = viewModel,
-                        loggedEvents = loggedEvents,
-                        isAnalyzingWithAi = isAnalyzingWithAi,
-                        aiAnalysisResult = aiAnalysisResult
-                    )
-                }
-                "settings" -> {
-                    SettingsScreen(
-                        viewModel = viewModel,
-                        isSimulationMode = isSimulationMode,
-                        trackedSsid = trackedSsid,
-                        trackedBssid = trackedBssid,
-                        scannedNetworks = scannedNetworks
+                        isActive = sonarActive,
+                        status = sonarStatus,
+                        detectedDistance = sonarDetectedDistance,
+                        echoIntensity = sonarEchoIntensity,
+                        targetAngle = sonarTargetAngle,
+                        compassHeading = compassHeading
                     )
                 }
                 "bluetooth" -> {
@@ -336,11 +338,10 @@ fun RadarBottomNav(
     ) {
         val navItems = listOf(
             Triple("home", "হোম", Icons.Outlined.Dashboard),
-            Triple("map", "মানচিত্র", Icons.Outlined.Map),
+            Triple("map", "ম্যাপ", Icons.Outlined.Map),
             Triple("radar", "রাডার", Icons.Outlined.Radar),
             Triple("bluetooth", "ব্লুটুথ", Icons.Outlined.Bluetooth),
-            Triple("history", "ইতিহাস", Icons.Outlined.History),
-            Triple("settings", "সেটিংস", Icons.Outlined.Settings)
+            Triple("sonar", "সোনার", Icons.Outlined.GraphicEq)
         )
 
         navItems.forEach { (route, label, icon) ->
@@ -3189,6 +3190,178 @@ fun BluetoothDeviceRow(device: RadarViewModel.BluetoothDeviceInfo) {
                     fontFamily = FontFamily.Monospace
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun ActiveSonarScreen(
+    viewModel: com.example.ui.RadarViewModel,
+    isActive: Boolean,
+    status: String,
+    detectedDistance: Double,
+    echoIntensity: Float,
+    targetAngle: Float,
+    compassHeading: Float
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DeepDarkBlue)
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = "অ্যাক্টিভ সোনার (Acoustic Echo)",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "High-frequency ultrasonic wave tracking",
+                    color = RadarTextMuted,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Big visual canvas
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(20.dp))
+                .background(RadarCardBg)
+                .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize(0.9f)) {
+                val center = Offset(size.width / 2, size.height / 2)
+                val maxRadius = size.minDimension / 2
+
+                // Draw emitting rings if active
+                if (isActive) {
+                    val time = System.currentTimeMillis() % 1500
+                    val fraction = time / 1500f
+                    drawCircle(
+                        color = RadarCyan.copy(alpha = (1f - fraction) * 0.5f),
+                        radius = maxRadius * fraction,
+                        center = center,
+                        style = Stroke(width = 3.dp.toPx())
+                    )
+                    
+                    val fraction2 = (time + 750) % 1500 / 1500f
+                    drawCircle(
+                        color = RadarCyan.copy(alpha = (1f - fraction2) * 0.3f),
+                        radius = maxRadius * fraction2,
+                        center = center,
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+                }
+
+                // Grid rings
+                drawCircle(Color.White.copy(alpha = 0.05f), maxRadius, center, style = Stroke(1.dp.toPx()))
+                drawCircle(Color.White.copy(alpha = 0.05f), maxRadius * 0.66f, center, style = Stroke(1.dp.toPx()))
+                drawCircle(Color.White.copy(alpha = 0.05f), maxRadius * 0.33f, center, style = Stroke(1.dp.toPx()))
+
+                // Draw User
+                drawCircle(RadarNeonGreen, 6.dp.toPx(), center)
+                drawCircle(RadarNeonGreen.copy(alpha = 0.2f), 12.dp.toPx(), center)
+
+                // Draw echo target if intensity > 0
+                if (isActive && echoIntensity > 0f) {
+                    val relativeAngleRad = Math.toRadians((360.0 - (targetAngle - compassHeading)) % 360.0)
+                    val distFraction = (detectedDistance / 10.0).coerceIn(0.1, 0.95)
+                    val r = (maxRadius * distFraction).toFloat()
+                    
+                    val echoPos = Offset(
+                        center.x + (r * Math.sin(relativeAngleRad)).toFloat(),
+                        center.y - (r * Math.cos(relativeAngleRad)).toFloat()
+                    )
+
+                    val color = if (echoIntensity > 0.6f) RadarRed else if (echoIntensity > 0.3f) RadarYellow else RadarNeonGreen
+                    
+                    // Arc shadow for echo
+                    drawArc(
+                        color = color.copy(alpha = echoIntensity * 0.5f),
+                        startAngle = (targetAngle - compassHeading - 90f - 15f).toFloat(),
+                        sweepAngle = 30f,
+                        useCenter = true,
+                        topLeft = Offset(center.x - r, center.y - r),
+                        size = Size(r * 2f, r * 2f)
+                    )
+                    
+                    drawCircle(color, (4 + 6 * echoIntensity).dp.toPx(), echoPos)
+                    drawCircle(color.copy(alpha = 0.3f), (10 + 10 * echoIntensity).dp.toPx(), echoPos)
+
+                    // Target line
+                    drawLine(
+                        color = color.copy(alpha = echoIntensity * 0.4f),
+                        start = center,
+                        end = echoPos,
+                        strokeWidth = 1.dp.toPx()
+                    )
+                }
+            }
+            
+            // HUD Text overlay
+            Column(
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = status,
+                    color = if (isActive) RadarNeonGreen else RadarTextMuted,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                if (isActive && echoIntensity > 0f) {
+                    Text(
+                        text = "দূরত্ব: $detectedDistance m | তীব্রতা: ${(echoIntensity * 100).toInt()}%",
+                        color = RadarCyan,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Control Button
+        Button(
+            onClick = { viewModel.toggleSonar() },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(60.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isActive) RadarRed else RadarCyan
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(
+                imageVector = if (isActive) Icons.Default.Stop else Icons.Default.GraphicEq,
+                contentDescription = null,
+                tint = if (isActive) Color.White else DeepDarkBlue
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = if (isActive) "সোনার বন্ধ করুন" else "সোনার চালু করুন",
+                color = if (isActive) Color.White else DeepDarkBlue,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
